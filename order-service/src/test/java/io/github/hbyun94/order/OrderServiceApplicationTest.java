@@ -2,22 +2,15 @@ package io.github.hbyun94.order;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.springframework.context.annotation.Import;
 
 /**
- * 실제 PostgreSQL 컨테이너(docker-compose와 같은 버전)를 띄워
- * 애플리케이션 컨텍스트가 DB에 연결된 상태로 정상 기동되는지 확인한다.
+ * 실제 PostgreSQL, Redis 컨테이너를 띄워 애플리케이션 컨텍스트가 정상 기동되는지 확인한다.
+ * Flyway 마이그레이션 적용과 Hibernate 스키마 검증(ddl-auto: validate)도 이때 함께 검증된다.
  */
 @SpringBootTest
-@Testcontainers
+@Import(TestcontainersConfiguration.class)
 class OrderServiceApplicationTest {
-
-    @Container
-    @ServiceConnection
-    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18.7");
 
     @Test
     void contextLoads() {

@@ -9,6 +9,11 @@ spring:
     url: jdbc:postgresql://${ORDER_DB_HOST:localhost}:${ORDER_DB_PORT:5433}/${ORDER_DB_NAME}
     username: ${ORDER_DB_USERNAME}
     password: ${ORDER_DB_PASSWORD}
+  data:
+    redis:
+      # 주문 요청 멱등 키 저장소
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
   jpa:
     # 트랜잭션이 끝나면 DB 커넥션도 반납한다 (기본값 true면 HTTP 응답이 끝날 때까지 커넥션을 붙잡는다)
     open-in-view: false
