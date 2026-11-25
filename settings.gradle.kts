@@ -5,4 +5,4 @@ plugins {
 
 rootProject.name = "order-stock-consistency"
 
-include("order-service")
+include("order-service", "stock-service")
