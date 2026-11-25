@@ -12,6 +12,9 @@ spring:
   jpa:
     # 트랜잭션이 끝나면 DB 커넥션도 반납한다 (기본값 true면 HTTP 응답이 끝날 때까지 커넥션을 붙잡는다)
     open-in-view: false
+    hibernate:
+      # 테이블은 Flyway가 만들고, Hibernate는 엔티티와 테이블이 일치하는지 검사만 한다
+      ddl-auto: validate
 
 management:
   endpoints:
