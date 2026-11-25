@@ -28,3 +28,26 @@ dependencies {
     testImplementation("org.testcontainers:testcontainers")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
+
+// 실험(@Tag("experiment"))은 오래 걸리고 결과를 기록하는 용도라 일반 test 작업에서 제외한다.
+tasks.named<Test>("test") {
+    useJUnitPlatform {
+        excludeTags("experiment")
+    }
+}
+
+// 실행: ./gradlew :stock-service:experiment  → 결과: build/experiment/
+val experiment by tasks.registering(Test::class) {
+    description = "동시성 실험을 실행하고 결과를 build/experiment/에 기록한다."
+    group = "verification"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform {
+        includeTags("experiment")
+    }
+    testLogging {
+        showStandardStreams = true
+    }
+    // 입력이 같아도 매번 다시 측정한다
+    outputs.upToDateWhen { false }
+}
