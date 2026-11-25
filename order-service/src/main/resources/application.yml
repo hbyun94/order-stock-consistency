@@ -1,0 +1,20 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: order-service
+  datasource:
+    # 접속 정보는 환경 변수(.env)에서 읽는다. 호스트/포트만 로컬 기본값을 둔다.
+    url: jdbc:postgresql://${ORDER_DB_HOST:localhost}:${ORDER_DB_PORT:5433}/${ORDER_DB_NAME}
+    username: ${ORDER_DB_USERNAME}
+    password: ${ORDER_DB_PASSWORD}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: always

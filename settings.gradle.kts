@@ -4,3 +4,5 @@ plugins {
 }
 
 rootProject.name = "order-stock-consistency"
+
+include("order-service")
