@@ -56,6 +56,45 @@ class StockResultListenerTest {
         awaitStatus(orderId, OrderStatus.CANCELLED);
     }
 
+    @Test
+    @DisplayName("[중복 소비] stock.reserved가 두 번 와도 주문은 RESERVED 그대로이고 예외 없이 처리된다")
+    void duplicateReserved() {
+        Long orderId = placePendingOrder();
+
+        orderService.markReserved(orderId);
+        orderService.markReserved(orderId); // 예외가 나지 않아야 한다
+
+        assertThat(orderRepository.findById(orderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.RESERVED);
+    }
+
+    @Test
+    @DisplayName("[모순] 이미 RESERVED인 주문에 실패 이벤트가 와도 예외 없이 무시하고 상태를 바꾸지 않는다")
+    void conflictingResultIgnored() {
+        Long orderId = placePendingOrder();
+        orderService.markReserved(orderId);
+
+        orderService.cancel(orderId); // 예외가 나지 않아야 한다
+
+        assertThat(orderRepository.findById(orderId).orElseThrow().getStatus()).isEqualTo(OrderStatus.RESERVED);
+    }
+
+    @Test
+    @DisplayName("[중복 소비] Kafka로 같은 실패 이벤트가 두 번 와도 주문은 CANCELLED 한 번으로 끝나고 다음 메시지도 처리된다")
+    void duplicateFailedThroughKafka() {
+        Long orderId = placePendingOrder();
+        Long nextOrderId = placePendingOrder();
+        StockReservationFailedEvent failed = new StockReservationFailedEvent(orderId, 1L, 2, "INSUFFICIENT_STOCK");
+
+        kafkaTemplate.send(KafkaTopics.STOCK_RESERVATION_FAILED, String.valueOf(orderId), failed).join();
+        kafkaTemplate.send(KafkaTopics.STOCK_RESERVATION_FAILED, String.valueOf(orderId), failed).join();
+        // 이어서 다른 주문의 결과를 보낸다: 중복 처리 후에도 소비가 계속되는지 확인
+        kafkaTemplate.send(KafkaTopics.STOCK_RESERVED, String.valueOf(nextOrderId),
+                new StockReservedEvent(nextOrderId, 1L, 2)).join();
+
+        awaitStatus(orderId, OrderStatus.CANCELLED);
+        awaitStatus(nextOrderId, OrderStatus.RESERVED);
+    }
+
     private Long placePendingOrder() {
         Long orderId = orderService.placeOrder(UUID.randomUUID().toString(), new PlaceOrderCommand(1L, 2))
                 .order().getId();
