@@ -1,5 +1,7 @@
 # order-stock-consistency
 
+[![CI](https://github.com/hbyun94/order-stock-consistency/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hbyun94/order-stock-consistency/actions/workflows/ci.yml)
+
 한정 재고 상품에 주문이 동시에 몰리는 상황에서 주문과 재고의 정합성을 지키는 시스템.
 
 > 흐름 그림, 기술별 설명, 실행 방법은 9단계에서 정리한다. 설계 결정은 [docs/decisions.md](docs/decisions.md)에 기록한다.
@@ -10,6 +12,7 @@
 
 - 코드: [`StockReservationConcurrencyExperiment`](stock-service/src/test/java/io/github/hbyun94/stock/experiment/StockReservationConcurrencyExperiment.java)
 - 실행: `./gradlew :stock-service:experiment` (Docker 필요, 약 1분). 결과는 `stock-service/build/experiment/experiment-1.md`에 저장된다.
+- GitHub에서 실행: Actions 탭 → "실험 1 - 락 방식 비교" → Run workflow. 결과 표가 실행 요약(Summary)에 남는다.
 
 ### 결과 (2026-11-25)
 
