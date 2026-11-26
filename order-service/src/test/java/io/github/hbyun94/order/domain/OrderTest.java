@@ -42,4 +42,40 @@ class OrderTest {
         assertThatThrownBy(() -> Order.place(KEY, FINGERPRINT, 1L, 0))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    @DisplayName("재고 예약이 성공하면 PENDING → RESERVED")
+    void markReserved() {
+        Order order = Order.place(KEY, FINGERPRINT, 1L, 1);
+
+        order.markReserved();
+
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.RESERVED);
+    }
+
+    @Test
+    @DisplayName("재고 예약이 실패하면 PENDING → CANCELLED (보상 처리)")
+    void cancel() {
+        Order order = Order.place(KEY, FINGERPRINT, 1L, 1);
+
+        order.cancel();
+
+        assertThat(order.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+    }
+
+    @Test
+    @DisplayName("PENDING이 아니면 다시 전이할 수 없다 (예약 완료 후 취소, 취소 후 예약 완료, 같은 전이 두 번)")
+    void transitionOnlyFromPending() {
+        Order reserved = Order.place(KEY, FINGERPRINT, 1L, 1);
+        reserved.markReserved();
+        Order cancelled = Order.place(KEY, FINGERPRINT, 1L, 1);
+        cancelled.cancel();
+
+        assertThatThrownBy(reserved::cancel).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(reserved::markReserved).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(cancelled::markReserved).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(cancelled::cancel).isInstanceOf(IllegalStateException.class);
+        assertThat(reserved.getStatus()).isEqualTo(OrderStatus.RESERVED);
+        assertThat(cancelled.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+    }
 }

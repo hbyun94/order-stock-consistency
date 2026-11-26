@@ -9,6 +9,7 @@ import io.github.hbyun94.order.idempotency.IdempotencyState.InProgress;
 import io.github.hbyun94.order.idempotency.IdempotencyStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
@@ -34,14 +35,17 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final IdempotencyStore idempotencyStore;
     private final TransactionTemplate transactionTemplate;
+    private final ApplicationEventPublisher eventPublisher;
 
     public OrderService(
             OrderRepository orderRepository,
             IdempotencyStore idempotencyStore,
-            TransactionTemplate transactionTemplate) {
+            TransactionTemplate transactionTemplate,
+            ApplicationEventPublisher eventPublisher) {
         this.orderRepository = orderRepository;
         this.idempotencyStore = idempotencyStore;
         this.transactionTemplate = transactionTemplate;
+        this.eventPublisher = eventPublisher;
     }
 
     public OrderResult placeOrder(String idempotencyKey, PlaceOrderCommand command) {
@@ -76,12 +80,33 @@ public class OrderService {
         return orderRepository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
     }
 
+    /** 재고 예약 성공 이벤트 처리: PENDING → RESERVED */
+    @Transactional
+    public void markReserved(Long orderId) {
+        findOrder(orderId).markReserved(); // 변경 감지로 커밋 시 UPDATE
+    }
+
+    /** 재고 예약 실패 이벤트 처리(보상): PENDING → CANCELLED */
+    @Transactional
+    public void cancel(Long orderId) {
+        findOrder(orderId).cancel();
+    }
+
+    private Order findOrder(Long orderId) {
+        return orderRepository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
+    }
+
     private OrderResult create(String idempotencyKey, String fingerprint, PlaceOrderCommand command, boolean keyHeld) {
         Order order;
         try {
             // 커밋까지 끝나야 반환된다
-            order = transactionTemplate.execute(status -> orderRepository.save(
-                    Order.place(idempotencyKey, fingerprint, command.productId(), command.quantity())));
+            order = transactionTemplate.execute(status -> {
+                Order saved = orderRepository.save(
+                        Order.place(idempotencyKey, fingerprint, command.productId(), command.quantity()));
+                // 트랜잭션 안에서 발행하지만, Kafka 전송은 커밋된 뒤에 일어난다 (D-025)
+                eventPublisher.publishEvent(new OrderPlacedEvent(saved.getId(), saved.getProductId(), saved.getQuantity()));
+                return saved;
+            });
         } catch (DataIntegrityViolationException e) {
             // DB 최종 방어선: 같은 키의 주문이 이미 커밋돼 있다 (Redis 키 만료/유실/장애로 1단계를 통과한 경우)
             Order existing = orderRepository.findByIdempotencyKey(idempotencyKey).orElseThrow(() -> e);
