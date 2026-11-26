@@ -9,7 +9,6 @@ import io.github.hbyun94.order.idempotency.IdempotencyState.InProgress;
 import io.github.hbyun94.order.idempotency.IdempotencyStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
@@ -35,17 +34,17 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final IdempotencyStore idempotencyStore;
     private final TransactionTemplate transactionTemplate;
-    private final ApplicationEventPublisher eventPublisher;
+    private final OrderEvents orderEvents;
 
     public OrderService(
             OrderRepository orderRepository,
             IdempotencyStore idempotencyStore,
             TransactionTemplate transactionTemplate,
-            ApplicationEventPublisher eventPublisher) {
+            OrderEvents orderEvents) {
         this.orderRepository = orderRepository;
         this.idempotencyStore = idempotencyStore;
         this.transactionTemplate = transactionTemplate;
-        this.eventPublisher = eventPublisher;
+        this.orderEvents = orderEvents;
     }
 
     public OrderResult placeOrder(String idempotencyKey, PlaceOrderCommand command) {
@@ -121,8 +120,8 @@ public class OrderService {
             order = transactionTemplate.execute(status -> {
                 Order saved = orderRepository.save(
                         Order.place(idempotencyKey, fingerprint, command.productId(), command.quantity()));
-                // 트랜잭션 안에서 발행하지만, Kafka 전송은 커밋된 뒤에 일어난다 (D-025)
-                eventPublisher.publishEvent(new OrderPlacedEvent(saved.getId(), saved.getProductId(), saved.getQuantity()));
+                // 주문과 같은 트랜잭션으로 Outbox에 이벤트를 저장한다. 함께 커밋되거나 함께 롤백된다 (D-036)
+                orderEvents.orderPlaced(saved);
                 return saved;
             });
         } catch (DataIntegrityViolationException e) {
