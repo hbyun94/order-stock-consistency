@@ -80,16 +80,34 @@ public class OrderService {
         return orderRepository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
     }
 
-    /** 재고 예약 성공 이벤트 처리: PENDING → RESERVED */
+    /**
+     * 재고 예약 성공 이벤트 처리: PENDING → RESERVED.
+     * 중복이면 무시하고, 모순(이미 취소된 주문)이면 경고를 남기고 넘어간다. 어느 쪽도 예외를 던지지 않아
+     * 같은 메시지가 무한히 재시도되지 않는다 (D-034).
+     */
     @Transactional
     public void markReserved(Long orderId) {
-        findOrder(orderId).markReserved(); // 변경 감지로 커밋 시 UPDATE
+        Order order = findOrder(orderId);
+        try {
+            if (!order.markReserved()) {
+                log.info("중복 재고 예약 완료 이벤트 무시: orderId={}", orderId);
+            }
+        } catch (IllegalStateException e) {
+            log.warn("모순된 재고 예약 완료 이벤트 무시: {}", e.getMessage());
+        }
     }
 
-    /** 재고 예약 실패 이벤트 처리(보상): PENDING → CANCELLED */
+    /** 재고 예약 실패 이벤트 처리(보상): PENDING → CANCELLED. 중복과 모순 처리는 markReserved와 같다. */
     @Transactional
     public void cancel(Long orderId) {
-        findOrder(orderId).cancel();
+        Order order = findOrder(orderId);
+        try {
+            if (!order.cancel()) {
+                log.info("중복 재고 예약 실패 이벤트 무시: orderId={}", orderId);
+            }
+        } catch (IllegalStateException e) {
+            log.warn("모순된 재고 예약 실패 이벤트 무시: {}", e.getMessage());
+        }
     }
 
     private Order findOrder(Long orderId) {

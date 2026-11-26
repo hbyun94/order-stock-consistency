@@ -76,16 +76,36 @@ public class Order {
         return new Order(idempotencyKey, requestFingerprint, productId, quantity);
     }
 
-    /** 재고 예약 성공. PENDING에서만 RESERVED로 갈 수 있다. */
-    public void markReserved() {
+    /**
+     * 재고 예약 성공: PENDING → RESERVED.
+     * 이미 RESERVED면 같은 결과 이벤트가 다시 온 것(중복 소비)이므로 아무것도 하지 않는다 (D-034).
+     *
+     * @return 상태가 바뀌었으면 true, 이미 RESERVED라서 그대로면 false
+     * @throws IllegalStateException CANCELLED처럼 모순된 상태일 때
+     */
+    public boolean markReserved() {
+        if (status == OrderStatus.RESERVED) {
+            return false;
+        }
         requirePending("재고 예약 완료");
         this.status = OrderStatus.RESERVED;
+        return true;
     }
 
-    /** 재고 예약 실패에 따른 보상 처리. PENDING에서만 CANCELLED로 갈 수 있다. */
-    public void cancel() {
+    /**
+     * 재고 예약 실패에 따른 보상 처리: PENDING → CANCELLED.
+     * 이미 CANCELLED면 중복 소비이므로 아무것도 하지 않는다 (D-034).
+     *
+     * @return 상태가 바뀌었으면 true, 이미 CANCELLED라서 그대로면 false
+     * @throws IllegalStateException RESERVED처럼 모순된 상태일 때
+     */
+    public boolean cancel() {
+        if (status == OrderStatus.CANCELLED) {
+            return false;
+        }
         requirePending("취소");
         this.status = OrderStatus.CANCELLED;
+        return true;
     }
 
     private void requirePending(String action) {

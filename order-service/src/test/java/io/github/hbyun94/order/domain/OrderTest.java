@@ -64,17 +64,29 @@ class OrderTest {
     }
 
     @Test
-    @DisplayName("PENDING이 아니면 다시 전이할 수 없다 (예약 완료 후 취소, 취소 후 예약 완료, 같은 전이 두 번)")
-    void transitionOnlyFromPending() {
+    @DisplayName("같은 전이가 다시 오면(중복 소비) 아무것도 바꾸지 않고 false를 돌려준다")
+    void sameTransitionTwiceIsNoOp() {
+        Order reserved = Order.place(KEY, FINGERPRINT, 1L, 1);
+        Order cancelled = Order.place(KEY, FINGERPRINT, 1L, 1);
+
+        assertThat(reserved.markReserved()).isTrue();
+        assertThat(reserved.markReserved()).isFalse();
+        assertThat(cancelled.cancel()).isTrue();
+        assertThat(cancelled.cancel()).isFalse();
+        assertThat(reserved.getStatus()).isEqualTo(OrderStatus.RESERVED);
+        assertThat(cancelled.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+    }
+
+    @Test
+    @DisplayName("모순된 전이(예약 완료 후 취소, 취소 후 예약 완료)는 예외가 나고 상태는 그대로다")
+    void conflictingTransitionThrows() {
         Order reserved = Order.place(KEY, FINGERPRINT, 1L, 1);
         reserved.markReserved();
         Order cancelled = Order.place(KEY, FINGERPRINT, 1L, 1);
         cancelled.cancel();
 
         assertThatThrownBy(reserved::cancel).isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(reserved::markReserved).isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(cancelled::markReserved).isInstanceOf(IllegalStateException.class);
-        assertThatThrownBy(cancelled::cancel).isInstanceOf(IllegalStateException.class);
         assertThat(reserved.getStatus()).isEqualTo(OrderStatus.RESERVED);
         assertThat(cancelled.getStatus()).isEqualTo(OrderStatus.CANCELLED);
     }
