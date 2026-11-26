@@ -17,7 +17,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * order.created 한 건을 멱등하게 처리한다 (D-033).
  * <p>
  * 주문 하나에 대한 결정(예약 성공/거절)은 딱 한 번만 내리고 {@link OrderEventResult}에 기록한다.
- * 같은 주문이 다시 오면 새로 판단하지 않고 기록된 결정을 돌려준다. 호출자는 그 결정으로 같은 결과 이벤트를 다시 보낸다.
+ * 결과 이벤트는 같은 트랜잭션으로 Outbox에 저장되어 반드시 발행된다 (D-036).
+ * 같은 주문이 다시 오면 새로 판단하지 않고 기록된 결정을 돌려줄 뿐, 결과 이벤트를 다시 만들지 않는다 (D-039).
  * <p>
  * 중복을 막는 장치는 세 겹이다.
  * <ol>
@@ -27,7 +28,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  *   <li>PK(order_id) 제약: 위를 모두 통과한 경우(예: 미등록 상품이라 잠글 행이 없을 때)에도
  *       두 번째 INSERT는 DB가 막는다. 진 쪽은 롤백하고 이긴 쪽의 기록을 읽는다.</li>
  * </ol>
- * 결정과 기록, 재고 변경은 한 트랜잭션이다. 그래서 "재고는 바뀌었는데 기록이 없는" 상태가 생기지 않는다.
+ * 결정 기록, 재고 변경, 결과 이벤트(Outbox) 저장은 한 트랜잭션이다.
+ * 그래서 "재고는 바뀌었는데 기록이 없는" 상태도, "결정은 났는데 결과 이벤트가 없는" 상태도 생기지 않는다.
  */
 @Service
 public class OrderReservationService {
@@ -36,16 +38,19 @@ public class OrderReservationService {
     private final StockReservationRepository reservationRepository;
     private final OrderEventResultRepository resultRepository;
     private final TransactionTemplate transactionTemplate;
+    private final ReservationResultEvents resultEvents;
 
     public OrderReservationService(
             StockRepository stockRepository,
             StockReservationRepository reservationRepository,
             OrderEventResultRepository resultRepository,
-            TransactionTemplate transactionTemplate) {
+            TransactionTemplate transactionTemplate,
+            ReservationResultEvents resultEvents) {
         this.stockRepository = stockRepository;
         this.reservationRepository = reservationRepository;
         this.resultRepository = resultRepository;
         this.transactionTemplate = transactionTemplate;
+        this.resultEvents = resultEvents;
     }
 
     /** 처리 결과와, 이번 호출이 중복(이미 결정된 주문)이었는지 */
@@ -89,6 +94,8 @@ public class OrderReservationService {
 
     private Processed record(OrderEventResult result) {
         // saveAndFlush: PK 위반을 커밋 시점이 아니라 여기서 바로 드러내 트랜잭션 안에서 실패하게 한다
-        return new Processed(resultRepository.saveAndFlush(result), false);
+        OrderEventResult saved = resultRepository.saveAndFlush(result);
+        resultEvents.resultDecided(saved); // 같은 트랜잭션으로 Outbox에 결과 이벤트 저장
+        return new Processed(saved, false);
     }
 }

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import io.github.hbyun94.order.TestcontainersConfiguration;
 import io.github.hbyun94.order.application.OrderService;
 import io.github.hbyun94.order.application.PlaceOrderCommand;
+import io.github.hbyun94.order.outbox.OutboxEventRepository;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -22,10 +23,10 @@ import org.springframework.kafka.core.ConsumerFactory;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
-/** 실제 Kafka에서 주문 생성 → order.created 발행을 검증한다 */
+/** 실제 Kafka에서 주문 생성 → Outbox 저장 → 발행기가 order.created를 보내는 전체 경로를 검증한다 */
 @SpringBootTest
 @Import(TestcontainersConfiguration.class)
-class OrderCreatedPublisherTest {
+class OrderCreatedOutboxTest {
 
     @Autowired
     OrderService orderService;
@@ -35,6 +36,9 @@ class OrderCreatedPublisherTest {
 
     @Autowired
     JsonMapper jsonMapper;
+
+    @Autowired
+    OutboxEventRepository outboxRepository;
 
     Consumer<String, String> consumer;
 
@@ -51,7 +55,7 @@ class OrderCreatedPublisherTest {
     }
 
     @Test
-    @DisplayName("주문이 저장되면 order.created가 상품 ID 키로 발행된다")
+    @DisplayName("주문이 저장되면 Outbox를 거쳐 order.created가 상품 ID 키로 발행되고, Outbox 행에 발행 시각이 기록된다")
     void publishAfterCommit() {
         Long orderId = orderService.placeOrder(UUID.randomUUID().toString(), new PlaceOrderCommand(7L, 3))
                 .order().getId();
@@ -66,8 +70,15 @@ class OrderCreatedPublisherTest {
         assertThat(body.get("productId").asLong()).isEqualTo(7L);
         assertThat(body.get("quantity").asInt()).isEqualTo(3);
         assertThat(body.hasNonNull("occurredAt")).isTrue();
-        // 타입 헤더를 끄므로 보내는 쪽 클래스 이름이 메시지에 실리지 않는다 (D-028)
+        // 문자열 JSON을 그대로 보내므로 보내는 쪽 클래스 이름(타입 헤더)이 메시지에 실리지 않는다 (D-028)
         assertThat(record.headers().lastHeader("__TypeId__")).isNull();
+        assertThat(outboxRepository.findAll())
+                .filteredOn(e -> jsonMapper.readTree(e.getPayload()).get("orderId").asLong() == orderId)
+                .singleElement()
+                .satisfies(e -> {
+                    assertThat(e.getPublishedAt()).isNotNull();
+                    assertThat(e.getMessageKey()).isEqualTo("7");
+                });
     }
 
     @Test
