@@ -3,12 +3,14 @@ package io.github.hbyun94.stock.messaging;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import io.github.hbyun94.stock.TestcontainersConfiguration;
+import io.github.hbyun94.stock.domain.OrderEventResultRepository;
 import io.github.hbyun94.stock.domain.ReservationStatus;
 import io.github.hbyun94.stock.domain.Stock;
 import io.github.hbyun94.stock.domain.StockRepository;
 import io.github.hbyun94.stock.domain.StockReservationRepository;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
@@ -49,11 +51,15 @@ class OrderCreatedListenerTest {
     @Autowired
     StockReservationRepository reservationRepository;
 
+    @Autowired
+    OrderEventResultRepository resultRepository;
+
     Consumer<String, String> resultConsumer;
     Long productId;
 
     @BeforeEach
     void setUp() {
+        resultRepository.deleteAllInBatch();
         reservationRepository.deleteAllInBatch();
         stockRepository.deleteAllInBatch();
         productId = ThreadLocalRandom.current().nextLong(1, 1_000_000);
@@ -110,6 +116,21 @@ class OrderCreatedListenerTest {
         assertThat(json(result).get("reason").asString()).isEqualTo("UNKNOWN_PRODUCT");
     }
 
+    @Test
+    @DisplayName("[중복 소비] 같은 order.created가 두 번 오면 재고는 한 번만 예약하고 같은 결과를 다시 보낸다")
+    void duplicateOrderCreated() {
+        long orderId = newOrderId();
+
+        sendOrderCreated(orderId, productId, 2);
+        sendOrderCreated(orderId, productId, 2);
+
+        List<ConsumerRecord<String, String>> results = awaitResults(orderId, 2);
+        assertThat(results).extracting(ConsumerRecord::topic).containsOnly(KafkaTopics.STOCK_RESERVED);
+        assertThat(stockRepository.findByProductId(productId).orElseThrow().getReserved()).isEqualTo(2);
+        assertThat(reservationRepository.count()).isEqualTo(1);
+        assertThat(resultRepository.count()).isEqualTo(1);
+    }
+
     private void sendOrderCreated(long orderId, long productId, int quantity) {
         kafkaTemplate.send(KafkaTopics.ORDER_CREATED, String.valueOf(productId),
                 new OrderCreatedEvent(orderId, productId, quantity, Instant.now())).join();
@@ -117,15 +138,24 @@ class OrderCreatedListenerTest {
 
     /** 이 주문 ID의 결과 이벤트가 올 때까지 기다린다 (최대 15초) */
     private ConsumerRecord<String, String> awaitResult(long orderId) {
+        return awaitResults(orderId, 1).getFirst();
+    }
+
+    /** 이 주문 ID의 결과 이벤트를 count건 받을 때까지 기다린다 (최대 15초) */
+    private List<ConsumerRecord<String, String>> awaitResults(long orderId, int count) {
+        List<ConsumerRecord<String, String>> matched = new ArrayList<>();
         long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
-        while (System.nanoTime() < deadline) {
+        while (System.nanoTime() < deadline && matched.size() < count) {
             for (ConsumerRecord<String, String> record : resultConsumer.poll(Duration.ofMillis(200))) {
                 if (json(record).get("orderId").asLong() == orderId) {
-                    return record;
+                    matched.add(record);
                 }
             }
         }
-        throw new AssertionError("결과 이벤트를 받지 못했습니다: orderId=" + orderId);
+        if (matched.size() < count) {
+            throw new AssertionError("결과 이벤트를 " + count + "건 받지 못했습니다: orderId=" + orderId + ", 받은 수=" + matched.size());
+        }
+        return matched;
     }
 
     private JsonNode json(ConsumerRecord<String, String> record) {
