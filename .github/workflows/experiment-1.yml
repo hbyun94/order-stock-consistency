@@ -1,0 +1,71 @@
+# 실험 1: 재고 100개에 동시 주문 1,000건 — 락 없음 / 낙관적 락 / 비관적 락 / Redis 분산 락 비교.
+# Actions 탭에서 "Run workflow" 버튼으로 직접 실행한다. PR CI에는 포함하지 않는다(실행 시간이 길다).
+# 결과 표는 실행 요약(Job Summary)과 아티팩트(experiment-1-result)에 남는다.
+name: 실험 1 - 락 방식 비교
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  experiment:
+    name: 동시 주문 1,000건 실험
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: JDK 25 설치
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Gradle 설정(캐시)
+        uses: gradle/actions/setup-gradle@v6
+
+      # 결과 판정(락 3종의 초과 판매 0)은 실험 테스트 안의 assert가 한다.
+      # 실패해도 그때까지의 콘솔 출력과 결과는 아래 단계에서 남긴다.
+      - name: 실험 실행
+        # shell: bash를 명시하면 -o pipefail이 켜져 tee로 파이프해도 Gradle 실패가 단계 실패로 전달된다
+        shell: bash
+        run: ./gradlew :stock-service:experiment 2>&1 | tee experiment.log
+
+      - name: 결과를 실행 요약에 기록
+        if: always()
+        run: |
+          {
+            echo "# 실험 1: 재고 100개, 동시 주문 1,000건"
+            echo
+            echo "- 커밋: \`${GITHUB_SHA::7}\` (${GITHUB_REF_NAME})"
+            echo "- 러너: ${RUNNER_OS} / $(nproc)코어 / $(free -g | awk '/Mem:/{print $2}')GB"
+            echo
+            if [ -f stock-service/build/experiment/experiment-1.md ]; then
+              cat stock-service/build/experiment/experiment-1.md
+            else
+              echo "결과 파일이 없습니다. 실험이 중간에 실패했습니다. 아래 로그를 확인하세요."
+              echo
+              echo '```'
+              tail -n 60 experiment.log
+              echo '```'
+            fi
+            echo
+            echo "<details><summary>회차별 원본 출력</summary>"
+            echo
+            echo '```'
+            grep -E '\[실험1\]' experiment.log || echo "(회차별 출력 없음)"
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 결과 아티팩트 업로드
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: experiment-1-result
+          path: |
+            stock-service/build/experiment/
+            experiment.log
+          retention-days: 30
