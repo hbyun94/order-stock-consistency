@@ -80,6 +80,22 @@ public class OrderService {
         return orderRepository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
     }
 
+    /** 재고 예약 성공 이벤트 처리: PENDING → RESERVED */
+    @Transactional
+    public void markReserved(Long orderId) {
+        findOrder(orderId).markReserved(); // 변경 감지로 커밋 시 UPDATE
+    }
+
+    /** 재고 예약 실패 이벤트 처리(보상): PENDING → CANCELLED */
+    @Transactional
+    public void cancel(Long orderId) {
+        findOrder(orderId).cancel();
+    }
+
+    private Order findOrder(Long orderId) {
+        return orderRepository.findById(orderId).orElseThrow(() -> new OrderNotFoundException(orderId));
+    }
+
     private OrderResult create(String idempotencyKey, String fingerprint, PlaceOrderCommand command, boolean keyHeld) {
         Order order;
         try {
