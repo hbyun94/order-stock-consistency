@@ -10,6 +10,8 @@ import io.github.hbyun94.stock.domain.ReservationOutcome;
 import io.github.hbyun94.stock.domain.Stock;
 import io.github.hbyun94.stock.domain.StockRepository;
 import io.github.hbyun94.stock.domain.StockReservationRepository;
+import io.github.hbyun94.stock.outbox.OutboxEvent;
+import io.github.hbyun94.stock.outbox.OutboxEventRepository;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -22,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import tools.jackson.databind.json.JsonMapper;
 
 /** 실제 PostgreSQL에서 주문 예약 멱등 처리(D-033)를 검증한다 */
 @SpringBootTest
@@ -45,8 +48,15 @@ class OrderReservationServiceTest {
     @Autowired
     OrderEventResultRepository resultRepository;
 
+    @Autowired
+    OutboxEventRepository outboxRepository;
+
+    @Autowired
+    JsonMapper jsonMapper;
+
     @BeforeEach
     void setUp() {
+        outboxRepository.deleteAllInBatch();
         resultRepository.deleteAllInBatch();
         reservationRepository.deleteAllInBatch();
         stockRepository.deleteAllInBatch();
@@ -115,6 +125,44 @@ class OrderReservationServiceTest {
         assertThat(results).filteredOn(p -> !p.duplicate()).hasSize(1);
         assertThat(results).allSatisfy(p -> assertThat(p.result().getReason()).isEqualTo(RejectionReason.UNKNOWN_PRODUCT));
         assertThat(resultRepository.count()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("[Outbox] 예약 성공 결정은 같은 트랜잭션으로 stock.reserved 행 1개를 남기고, 중복 처리는 행을 더 만들지 않는다")
+    void reservedResultGoesToOutboxOnce() {
+        service.process(100L, PRODUCT_ID, 2);
+        service.process(100L, PRODUCT_ID, 2);
+
+        assertThat(outboxRowsFor(100L)).singleElement().satisfies(e -> {
+            assertThat(e.getTopic()).isEqualTo("stock.reserved");
+            assertThat(e.getMessageKey()).isEqualTo("100");
+        });
+    }
+
+    @Test
+    @DisplayName("[Outbox] 거절 결정도 stock.reservation-failed 행으로 남는다")
+    void rejectedResultGoesToOutbox() {
+        service.process(200L, PRODUCT_ID, 3); // 재고 2개에 3개 요청
+
+        assertThat(outboxRowsFor(200L)).singleElement().satisfies(e -> {
+            assertThat(e.getTopic()).isEqualTo("stock.reservation-failed");
+            assertThat(e.getPayload()).contains("INSUFFICIENT_STOCK");
+        });
+    }
+
+    @Test
+    @DisplayName("[Outbox] 같은 주문을 동시에 10번 처리해도 Outbox 행은 1개다 (진 쪽 트랜잭션과 함께 롤백)")
+    void concurrentDuplicatesLeaveOneOutboxRow() throws Exception {
+        runConcurrently(10, () -> service.process(100L, PRODUCT_ID, 2));
+
+        assertThat(outboxRowsFor(100L)).hasSize(1);
+    }
+
+    private List<OutboxEvent> outboxRowsFor(long orderId) {
+        return outboxRepository.findAll().stream()
+                // payload는 JSONB라 PostgreSQL이 공백을 정규화해 저장한다. 문자열 비교 대신 파싱해서 비교한다
+                .filter(e -> jsonMapper.readTree(e.getPayload()).get("orderId").asLong() == orderId)
+                .toList();
     }
 
     private int reserved() {
