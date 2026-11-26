@@ -83,8 +83,13 @@ class ResultEventOutageTest {
             unpauseKafka();
         }
 
-        assertThat(relay.relay()).isGreaterThanOrEqualTo(1);
-        assertThat(findResultRow(orderId).getPublishedAt()).isNotNull();
+        // 컨테이너를 다시 켠 직후에는 프로듀서가 재접속 중이라 바로 다음 시도도 실패할 수 있다.
+        // 운영에서처럼 주기를 반복해 결국 발행되는지 본다
+        await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(500)).until(() -> {
+            relay.relay();
+            return findResultRow(orderId).getPublishedAt() != null;
+        });
+        assertThat(findResultRow(orderId).getAttempts()).isGreaterThanOrEqualTo(2);
         assertThat(stockRepository.findByProductId(productId).orElseThrow().getReserved()).isEqualTo(3);
 
         try (Consumer<String, String> consumer = consumerFactory.createConsumer("test-" + UUID.randomUUID(), null)) {

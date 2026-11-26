@@ -2,11 +2,13 @@ package io.github.hbyun94.order.outbox;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 
 import io.github.hbyun94.order.TestcontainersConfiguration;
 import io.github.hbyun94.order.application.OrderEvents;
 import io.github.hbyun94.order.domain.Order;
 import io.github.hbyun94.order.domain.OrderRepository;
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -103,7 +105,7 @@ class OutboxRelayTest {
     }
 
     @Test
-    @DisplayName("브로커 장애 중에는 발행에 실패해도 행이 남고, 복구 후 다음 주기에 발행된다")
+    @DisplayName("브로커 장애 중에는 발행에 실패해도 행이 남고, 복구 후 이어지는 주기에 발행된다")
     void retryAfterBrokerOutage() {
         saveOrderWithEvent();
         pauseKafka();
@@ -119,12 +121,14 @@ class OutboxRelayTest {
             unpauseKafka();
         }
 
-        int published = relay.relay();
-
-        assertThat(published).isEqualTo(1);
+        // 컨테이너를 다시 켠 직후에는 프로듀서가 재접속 중이라 바로 다음 시도도 실패할 수 있다.
+        // 운영에서처럼 주기를 반복해 결국 발행되는지 본다
+        await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(500)).until(() -> {
+            relay.relay();
+            return outboxRepository.findAll().getFirst().getPublishedAt() != null;
+        });
         OutboxEvent sent = outboxRepository.findAll().getFirst();
-        assertThat(sent.getPublishedAt()).isNotNull();
-        assertThat(sent.getAttempts()).isEqualTo(2);
+        assertThat(sent.getAttempts()).isGreaterThanOrEqualTo(2);
         assertThat(outboxRepository.countByPublishedAtIsNull()).isZero();
     }
 
