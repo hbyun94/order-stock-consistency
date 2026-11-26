@@ -76,6 +76,25 @@ public class Order {
         return new Order(idempotencyKey, requestFingerprint, productId, quantity);
     }
 
+    /** 재고 예약 성공. PENDING에서만 RESERVED로 갈 수 있다. */
+    public void markReserved() {
+        requirePending("재고 예약 완료");
+        this.status = OrderStatus.RESERVED;
+    }
+
+    /** 재고 예약 실패에 따른 보상 처리. PENDING에서만 CANCELLED로 갈 수 있다. */
+    public void cancel() {
+        requirePending("취소");
+        this.status = OrderStatus.CANCELLED;
+    }
+
+    private void requirePending(String action) {
+        if (status != OrderStatus.PENDING) {
+            throw new IllegalStateException(
+                    "PENDING 상태에서만 " + action + " 처리할 수 있습니다: orderId=" + id + ", 현재 상태=" + status);
+        }
+    }
+
     public Long getId() {
         return id;
     }
