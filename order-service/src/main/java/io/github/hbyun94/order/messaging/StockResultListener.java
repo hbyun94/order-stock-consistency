@@ -12,8 +12,7 @@ import org.springframework.stereotype.Component;
  *   <li>stock.reserved → 주문 RESERVED</li>
  *   <li>stock.reservation-failed → 주문 CANCELLED (보상 처리, D-030)</li>
  * </ul>
- * 상태 전이는 PENDING에서만 가능하다. 같은 결과 이벤트가 두 번 오면 두 번째는 예외가 난다.
- * 중복 소비를 어떻게 다룰지는 6단계에서 정한다.
+ * 같은 결과 이벤트가 다시 와도(중복 소비) 상태 기반으로 무시한다. 예외를 던지지 않으므로 재시도가 반복되지 않는다 (D-034).
  */
 @Component
 public class StockResultListener {
