@@ -117,15 +117,16 @@ class OrderCreatedListenerTest {
     }
 
     @Test
-    @DisplayName("[중복 소비] 같은 order.created가 두 번 오면 재고는 한 번만 예약하고 같은 결과를 다시 보낸다")
+    @DisplayName("[중복 소비] 같은 order.created가 두 번 오면 재고는 한 번만 예약하고 결과 이벤트도 한 번만 나간다 (D-039)")
     void duplicateOrderCreated() {
         long orderId = newOrderId();
 
         sendOrderCreated(orderId, productId, 2);
         sendOrderCreated(orderId, productId, 2);
 
-        List<ConsumerRecord<String, String>> results = awaitResults(orderId, 2);
+        List<ConsumerRecord<String, String>> results = awaitResults(orderId, 1);
         assertThat(results).extracting(ConsumerRecord::topic).containsOnly(KafkaTopics.STOCK_RESERVED);
+        assertNoMoreResults(orderId, Duration.ofSeconds(3));
         assertThat(stockRepository.findByProductId(productId).orElseThrow().getReserved()).isEqualTo(2);
         assertThat(reservationRepository.count()).isEqualTo(1);
         assertThat(resultRepository.count()).isEqualTo(1);
@@ -156,6 +157,18 @@ class OrderCreatedListenerTest {
             throw new AssertionError("결과 이벤트를 " + count + "건 받지 못했습니다: orderId=" + orderId + ", 받은 수=" + matched.size());
         }
         return matched;
+    }
+
+    /** 일정 시간 동안 이 주문의 결과 이벤트가 더 오지 않는지 확인한다 */
+    private void assertNoMoreResults(long orderId, Duration wait) {
+        long deadline = System.nanoTime() + wait.toNanos();
+        while (System.nanoTime() < deadline) {
+            for (ConsumerRecord<String, String> record : resultConsumer.poll(Duration.ofMillis(200))) {
+                if (json(record).get("orderId").asLong() == orderId) {
+                    throw new AssertionError("결과 이벤트가 한 번 더 왔습니다: orderId=" + orderId);
+                }
+            }
+        }
     }
 
     private JsonNode json(ConsumerRecord<String, String> record) {
