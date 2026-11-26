@@ -38,8 +38,9 @@ public class OrderEventResult implements Persistable<Long> {
     @Column(name = "outcome", nullable = false, length = 20)
     private ReservationOutcome outcome;
 
+    @Enumerated(EnumType.STRING)
     @Column(name = "reason", length = 30)
-    private String reason;
+    private RejectionReason reason;
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
@@ -52,7 +53,7 @@ public class OrderEventResult implements Persistable<Long> {
         // JPA 전용 (DB에서 읽은 객체는 isNew=false)
     }
 
-    private OrderEventResult(Long orderId, Long productId, int quantity, ReservationOutcome outcome, String reason) {
+    private OrderEventResult(Long orderId, Long productId, int quantity, ReservationOutcome outcome, RejectionReason reason) {
         this.orderId = orderId;
         this.productId = productId;
         this.quantity = quantity;
@@ -65,8 +66,8 @@ public class OrderEventResult implements Persistable<Long> {
         return new OrderEventResult(orderId, productId, quantity, ReservationOutcome.RESERVED, null);
     }
 
-    public static OrderEventResult rejected(Long orderId, Long productId, int quantity, String reason) {
-        if (reason == null || reason.isBlank()) {
+    public static OrderEventResult rejected(Long orderId, Long productId, int quantity, RejectionReason reason) {
+        if (reason == null) {
             throw new IllegalArgumentException("거절 사유는 필수입니다");
         }
         return new OrderEventResult(orderId, productId, quantity, ReservationOutcome.REJECTED, reason);
@@ -98,7 +99,7 @@ public class OrderEventResult implements Persistable<Long> {
         return outcome;
     }
 
-    public String getReason() {
+    public RejectionReason getReason() {
         return reason;
     }
 
