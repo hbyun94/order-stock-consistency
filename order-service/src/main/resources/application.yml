@@ -14,6 +14,21 @@ spring:
       # 주문 요청 멱등 키 저장소
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # 값은 JSON으로 보낸다. 클래스 이름을 담는 타입 헤더는 끈다: 받는 쪽은 자기 record로 읽는다 (D-028)
+      value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+      properties:
+        spring.json.add.type.headers: false
+    consumer:
+      group-id: order-service
+      # 소비자 그룹이 처음 붙을 때 토픽의 처음부터 읽는다 (구독 전에 들어온 이벤트를 놓치지 않기 위함)
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # 문자열로 받은 뒤, 리스너 메서드의 파라미터 타입에 맞춰 JSON을 변환한다 (KafkaConfig의 메시지 컨버터)
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
   jpa:
     # 트랜잭션이 끝나면 DB 커넥션도 반납한다 (기본값 true면 HTTP 응답이 끝날 때까지 커넥션을 붙잡는다)
     open-in-view: false
