@@ -2,205 +2,275 @@
 
 [![CI](https://github.com/hbyun94/order-stock-consistency/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hbyun94/order-stock-consistency/actions/workflows/ci.yml)
 
-한정 재고 상품에 주문이 동시에 몰리는 상황에서 주문과 재고의 정합성을 지키는 시스템.
+한정 재고 상품에 주문이 동시에 몰리는 상황에서 **주문과 재고의 정합성**을 지키는 시스템이다. 주문 서비스와 재고 서비스가 각자의 DB를 갖고 Kafka 이벤트로 협력한다. 이때 생기는 문제(동시성, 중복 요청, 중복 소비, 발행 유실, 처리 실패)를 하나씩 재현하고, 해결책을 숫자로 검증했다.
 
-> 흐름 그림, 기술별 설명, 실행 방법은 9단계에서 정리한다. 설계 결정은 [docs/decisions.md](docs/decisions.md)에 기록한다.
-
----
-
-## 실험 1: 재고 100개에 동시 주문 1,000건 — 락 방식별 비교
-
-- 코드: [`StockReservationConcurrencyExperiment`](stock-service/src/test/java/io/github/hbyun94/stock/experiment/StockReservationConcurrencyExperiment.java)
-- 실행: `./gradlew :stock-service:experiment` (Docker 필요, 약 1분). 결과는 `stock-service/build/experiment/experiment-1.md`에 저장된다.
-- GitHub에서 실행: Actions 탭 → "실험 1 - 락 방식 비교" → Run workflow. 결과 표가 실행 요약(Summary)에 남는다.
-
-### 결과 (2026-11-26, GitHub Actions 러너)
-
-- 실행: [실험 1 워크플로 run #1](https://github.com/hbyun94/order-stock-consistency/actions/runs/45742635619) (main `f30428c`)
-- 조건: 재고 100개, 동시 요청 1,000건(각 1개, 주문 ID 모두 다름), 스레드 100개, DB 커넥션 풀 10개(Boot 기본값), 예열 1회 후 5회 측정
-- 환경: GitHub 호스팅 러너 ubuntu-latest(4코어), Java 25, PostgreSQL 18.7 / Redis 8.10.3 (Testcontainers, 단일 JVM)
-- 표기: 중앙값 (최소~최대)
-
-| 방식 | 성공 예약 | 초과 판매 | 재고 수치 불일치 | 재고 부족 실패 | 낙관적 락 충돌(재시도) | 재시도 소진 실패 | 기타 실패 | 처리 시간(ms) |
-|---|---|---|---|---|---|---|---|---|
-| 락 없음 | 895 (866~989) | **795 (766~889)** | **795 (766~891)** | 105 (11~134) | 0 | 0 | 0 | 699 (585~728) |
-| 낙관적 락 | 100 | 0 | 0 | 900 (899~900) | 663 (638~687) | 0 (0~1) | 0 | 621 (582~747) |
-| 비관적 락 | 100 | 0 | 0 | 900 | 0 | 0 | 0 | **283 (249~306)** |
-| Redis 분산 락 | 100 | 0 | 0 | 900 | 0 | 0 | 0 | 848 (822~1043) |
-
-용어:
-- **초과 판매** = 저장된 예약 기록 수 − 재고 100
-- **재고 수치 불일치** = 저장된 예약 기록 수 − `stock.reserved`. lost update로 사라진 증가분이다.
-- **낙관적 락 충돌** = Hibernate 통계의 `optimisticFailureCount`. 충돌 1회는 재시도 1회 또는 재시도 소진 1건을 뜻한다.
-
-### 해석
-
-**락 없음: 재고 100개에 약 900건을 팔았다.**
-- 각 트랜잭션은 락 없이 `reserved`를 읽고, 메모리에서 +1 한 값을 `UPDATE stock SET reserved = ?`로 덮어쓴다.
-- PostgreSQL의 UPDATE는 행 락을 잡기 때문에 쓰기 자체는 한 줄로 선다. 하지만 읽기가 그보다 먼저 락 없이 일어났기 때문에, 나중에 쓰는 쪽이 옛 값으로 계산한 결과로 앞의 변경을 덮어쓴다(lost update).
-- 4회차의 최종 `reserved`는 100이 아니라 **98**이었다. 한 번 100에 도달해 이후 11건이 재고 부족으로 실패했는데, 그 뒤 늦게 커밋된 옛 값(97+1)이 덮어써서 숫자가 거꾸로 내려갔다. 재고 수치가 실제 판매와 무관하게 움직인다.
-- DB의 `CHECK (reserved <= on_hand)` 제약은 한 번도 걸리지 않았다. 덮어쓴 값 자체는 언제나 100 이하이기 때문이다. **DB 제약은 lost update를 막지 못한다.**
-- 같은 현상을 스레드 없이 두 트랜잭션 순서를 고정해 재현한 테스트: [`LostUpdateTest`](stock-service/src/test/java/io/github/hbyun94/stock/domain/LostUpdateTest.java)
-
-**세 가지 락 모두 초과 판매 0, 수치 불일치 0이다** (5회 모두. 테스트가 이를 assert한다).
-
-**비관적 락이 가장 빠르다 (283ms).**
-- `SELECT ... FOR NO KEY UPDATE`로 행을 잠그면 요청들이 DB 안에서 줄을 서고, 앞 요청이 커밋하자마자 다음 요청이 최신 값을 읽는다. 버려지는 작업이 없다.
-- 행 하나에 경합이 몰리는 이 시나리오에서는 줄 세우기가 가장 효율적이다.
-- 대가: 기다리는 동안 DB 커넥션을 붙잡는다. 그래서 동시에 DB에 들어가는 요청 수가 커넥션 풀 크기(10)로 제한된다. 실무에서는 락 대기 타임아웃이 필요하다.
-
-**낙관적 락은 비관적 락의 2배 이상 걸린다 (621ms).**
-- 성공 100건을 만드는 데 충돌이 약 660번 일어났다(성공 1건당 약 6.6회). 충돌할 때마다 조회, INSERT, UPDATE를 한 뒤 롤백하고, 10~50ms를 기다렸다가 처음부터 다시 한다. 행이 하나라 동시에 들어간 요청 중 하나만 이기고 나머지 작업은 버려진다.
-- 2회와 3회에서 재시도 소진(10회 연속 충돌)이 1건씩 나왔다. 성공 수가 100으로 유지된 건 다른 요청이 그 자리를 채웠기 때문이다. 요청이 재고보다 적은 상황이라면 재고가 남았는데도 실패하는 과소 판매가 된다.
-- 매진 이후의 900건은 재고를 읽고 "부족"으로 바로 끝난다. UPDATE를 하지 않으므로 충돌하지 않는다.
-- 재시도는 트랜잭션 바깥에서 새 트랜잭션으로 한다. 같은 트랜잭션 안에서는 옛 version 때문에 계속 실패한다.
-
-**Redis 분산 락이 가장 느리다 (848ms, 비관적 락의 약 3배).**
-- 요청마다 Redis 왕복이 추가된다: 락 획득과 해제, 그리고 대기자는 Pub/Sub 해제 알림을 받아 깨어난다. 그 위에서 다시 DB 트랜잭션을 실행한다.
-- 매진 이후의 900건도 락을 하나씩 순서대로 통과해야 한다.
-- 대신 락을 기다리는 동안에는 DB 커넥션을 쓰지 않고, DB 밖의 자원까지 보호할 수 있다. 대가로 Redis가 새 장애 지점이 된다.
-
-**결정:** 재고 예약에는 비관적 락을 쓴다. 근거와 조건은 [D-024](docs/decisions.md)에 있다.
-
-### 한계와 측정 환경 차이
-
-- **절대 시간보다 상대 비교로 읽어야 한다.** 단일 JVM, 4코어에서 앱과 DB, Redis 컨테이너가 CPU를 나눠 쓴다.
-- **커넥션 풀 크기:** 결과에 직접 영향을 준다. 기본값 10으로 고정했다.
-- **환경에 따라 결론이 달랐다.** 2026-11-25에 개발용 클라우드 컨테이너(Docker를 같은 4코어에서 실행)에서 측정했을 때는 낙관적 락과 비관적 락의 처리 시간 범위가 겹쳤다. 비관적 555ms(468~650), 낙관적 662ms(592~739)였고, 세 번 실행하는 동안 순위도 바뀌었다. 그래서 "차이는 오차 범위"라고 판단했다. GitHub 러너에서는 범위가 겹치지 않을 만큼 차이가 분명했다(249~306 vs 582~747). 원인은 확정하지 못했으며, 결정은 재현 가능한 GitHub 러너 결과를 기준으로 했다.
-- **미해결 관찰:** 클라우드 컨테이너 측정 중 한 번, 락 없음 경로에서 `ObjectOptimisticLockingFailureException`(UPDATE 0행 갱신)이 1건 발생했다.
-  - `@Version`이 없는 엔티티라 예상하지 못한 결과다.
-  - 이후 컨테이너 66회와 GitHub 러너 5회에서 재현되지 않았고, 원인은 확정하지 못했다.
-  - 실험 코드는 예상 밖 예외의 근본 원인 메시지를 출력한다.
+- **기술:** Java 25, Spring Boot 4.1, JPA(Hibernate 7), Kafka 4.3(KRaft), Redis 8, PostgreSQL 18, Docker Compose, Testcontainers, GitHub Actions
+- **설계 결정 49건:** 날짜, 선택지, 근거를 [docs/decisions.md](docs/decisions.md)에 기록했다
+- **실험 3개:** 아래에 요약했고 상세는 [docs/experiments.md](docs/experiments.md)에 있다
+- **범위 밖:** 회원/인증, 결제, 관리자 화면, 프론트엔드, Kubernetes, API 게이트웨이, 서비스 디스커버리
 
 ---
 
-## 실험 2: 같은 이벤트를 두 번 소비하면
+## 구성
 
-Kafka는 기본적으로 "최소 한 번" 전달한다. 처리를 마쳤어도 오프셋을 커밋하기 전에 문제가 생기면 같은 메시지가 다시 온다. 예: 프로세스 재시작, 리밸런싱, 이 프로젝트에서는 결과 이벤트 전송 실패. 그래서 소비자가 멱등해야 한다.
+```mermaid
+flowchart LR
+    client([클라이언트])
+    wms([창고 시스템])
 
-- 코드: [`DuplicateConsumptionExperimentTest`](stock-service/src/test/java/io/github/hbyun94/stock/experiment/DuplicateConsumptionExperimentTest.java)
-- 실행: 일반 테스트에 포함된다(`./gradlew build`, 몇 초). 결과는 `stock-service/build/experiment/experiment-2.md`에 저장된다.
-- 재전달 흉내: 처리 중 예외가 나면 같은 메시지를 최대 10번 시도한다(Spring Kafka 기본 오류 처리기와 같음). 실제 Kafka 위에서의 중복과 재전달은 [`OrderCreatedListenerTest`](stock-service/src/test/java/io/github/hbyun94/stock/messaging/OrderCreatedListenerTest.java)와 [`OrderCreatedRedeliveryTest`](stock-service/src/test/java/io/github/hbyun94/stock/messaging/OrderCreatedRedeliveryTest.java)가 검증한다.
+    subgraph order["order-service :8081"]
+        oapi[주문 API]
+        orelay[Outbox 발행기]
+    end
+    subgraph stock["stock-service :8082"]
+        slistener[예약 리스너]
+        srelay[Outbox 발행기]
+        sapi[확정·해제 API]
+    end
 
-### 시나리오와 방식
+    redis[(Redis<br/>멱등 키)]
+    odb[(order DB<br/>orders, outbox_event)]
+    sdb[(stock DB<br/>stock, stock_reservation,<br/>order_event_result, outbox_event)]
+    kafka{{Kafka<br/>order.created<br/>stock.reserved<br/>stock.reservation-failed<br/>*.dlt}}
 
-| 시나리오 | 내용 |
-|---|---|
-| ① | 같은 `order.created`가 두 번 전달된다 |
-| ② | 예약 커밋 후 결과 이벤트 전송이 한 번 실패해 같은 메시지가 재전달된다 (이 프로젝트의 실제 재전달 경로) |
-| ③ | 재고 부족으로 거절된 주문이, 그 사이 재고가 풀린 뒤 다시 전달된다 |
+    client --> oapi
+    oapi --> redis
+    oapi --> odb
+    orelay --> odb
+    orelay --> kafka
+    kafka --> slistener
+    slistener --> sdb
+    srelay --> sdb
+    srelay --> kafka
+    kafka --> order
+    wms --> sapi
+    sapi --> sdb
+```
 
-| 방식 | 설명 |
-|---|---|
-| 기록 없이 차감 (기준선) | 주문별 기록 없이 재고 숫자만 줄인다. 테스트에만 있는 코드 |
-| 예약 기록 UNIQUE만 (5단계) | `stock_reservation.order_id UNIQUE`가 있고, 중복이면 위반 예외가 난다 |
-| 처리 결과 기록 + 재발행 (6단계) | 주문 하나의 결정을 `order_event_result`에 한 번만 기록하고, 중복이면 기록된 결과를 다시 보낸다 ([D-033](docs/decisions.md)) |
+- 서비스마다 DB가 따로 있다. 서비스 사이의 데이터는 Kafka 이벤트로만 오간다. 이벤트 클래스도 공유하지 않고 JSON 필드로 계약을 맞춘다(D-028).
+- 두 서비스 모두 이벤트를 Transactional Outbox로 발행한다(D-036).
 
-### 결과 (2026-11-26)
+## 주문 흐름
 
-주문 수량은 2개. 정상이라면 재고 차감(시나리오 후 `stock.reserved`)은 ①② 2, ③ 0이어야 한다.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as 클라이언트
+    participant O as order-service
+    participant R as Redis
+    participant ODB as order DB
+    participant K as Kafka
+    participant S as stock-service
+    participant SDB as stock DB
+    actor W as 창고 시스템
 
-| 방식 | ① 재고 차감 | ① 결과 전송 | ① 재시도 소진 | ② 재고 차감 | ② 결과 전송 | ② 처리 실패 | ② 재시도 소진 | ③ 재전달 시 결정 | ③ 재고 차감 |
-|---|---|---|---|---|---|---|---|---|---|
-| 기록 없이 차감 (기준선) | **4** | 2 | 0 | **4** | 1 | 1 | 0 | RESERVED | **2** |
-| 예약 기록 UNIQUE만 (5단계) | 2 | 1 | **1** | 2 | **0** | 10 | **1** | RESERVED | **2** |
-| 처리 결과 기록 + 재발행 (6단계) | 2 | 2 | 0 | 2 | 1 | 1 | 0 | REJECTED | 0 |
+    C->>O: POST /orders (Idempotency-Key)
+    O->>R: SET key NX EX (중복 요청 차단)
+    O->>ODB: 주문(PENDING) + outbox_event 한 트랜잭션
+    O-->>C: 201 Created
+    O->>K: Outbox 발행기가 order.created 전송 (키: 상품 ID)
+    K->>S: order.created
+    S->>SDB: 재고 행 비관적 락(최대 3초) → 예약 → 결정 기록 + outbox_event 한 트랜잭션
+    S->>K: stock.reserved 또는 stock.reservation-failed (키: 주문 ID)
+    K->>O: 결과 이벤트
+    O->>ODB: RESERVED, 또는 CANCELLED(보상)
+    W->>S: POST /reservations/{orderId}/confirm
+    S->>SDB: 예약 행 → 재고 행 락 → 실물 재고 차감
+    Note over K,S: 처리 실패 시 1s→2s→4s→8s 재시도 후 원래 토픽 이름 + .dlt
+```
 
-### 해석
-
-**기록 없이 차감: 중복 차감이 일어난다.** 재고는 "몇 개 남았나"만 알고 "이 주문을 처리했나"는 모른다. 그래서 같은 주문이 두 번 오면 두 번 줄인다(①②에서 2가 아니라 4). ③에서는 이미 거절한 주문을 이번엔 예약해 버린다.
-
-**예약 기록 UNIQUE만: 중복 차감은 막지만 흐름이 멈춘다.**
-- ①: 두 번째 처리가 UNIQUE 위반으로 실패한다. 10번 재시도한 뒤 메시지를 건너뛴다(재시도 소진). 차감은 안전하지만 매번 의미 없는 실패가 쌓인다.
-- ②가 진짜 문제다. 첫 시도에서 예약은 커밋됐고 결과 전송만 실패했는데, 재전달된 처리가 매번 UNIQUE 위반으로 실패한다. 결국 **결과 이벤트가 한 번도 나가지 않는다.** 주문은 PENDING에 영원히 멈춘다.
-- ③: 거절에는 기록이 남지 않는다. 재고가 풀린 뒤 다시 오면 이번엔 예약에 성공한다. 이미 취소된 주문이 재고 2개를 잡고 있는 **재고 누수**다.
-- DB 제약은 "두 번째 쓰기"를 막을 뿐, "이미 처리했으니 같은 답을 다시 준다"는 멱등성을 주지 못한다.
-
-**처리 결과 기록 + 재발행: 결정은 한 번, 응답은 몇 번이든 같다.**
-- ①: 차감은 1번이다. 두 번째 전달에는 기록된 결과를 그대로 다시 보낸다(결과 전송 2). 받는 쪽인 주문 서비스도 상태 기반으로 멱등하게 처리하므로 문제가 없다([D-034](docs/decisions.md)).
-- ②: 재전달 때 새로 판단하지 않고 기록된 결과를 보낸다. 첫 전송 실패가 복구되어 주문이 정상 완료된다.
-- ③: 거절 결정도 기록되어 있어서, 재고가 풀려도 같은 주문은 다시 거절된다. 누수가 없다.
-- 결정과 기록과 재고 변경이 한 트랜잭션이라 "재고만 바뀌고 기록이 없는" 상태가 없다.
-- 같은 주문이 동시에 들어와도 중복을 막는다. 재고 행 락을 얻은 뒤 기록을 한 번 더 확인하고, 마지막으로 `order_id` PK가 막는다([`OrderReservationServiceTest`](stock-service/src/test/java/io/github/hbyun94/stock/application/OrderReservationServiceTest.java)).
-
-**Kafka 설정만으로는 해결되지 않는다.**
-- 멱등 프로듀서(`enable.idempotence`, 기본값 켜짐)는 프로듀서가 재시도할 때 브로커에 같은 메시지가 두 번 쌓이는 것만 막는다. 소비자 재전달은 막지 못한다.
-- Kafka 트랜잭션은 DB 커밋과 묶이지 않는다.
-- 그래서 비즈니스 키(주문 ID)로 소비자에서 멱등하게 처리했다.
+1. **중복 요청 차단:** 같은 `Idempotency-Key`의 재요청은 새 주문을 만들지 않고 처음 응답을 그대로 돌려준다(`Idempotent-Replayed: true`).
+2. **주문 저장과 이벤트 발행:** 주문과 이벤트를 한 트랜잭션으로 DB에 저장한다. 발행기가 브로커에 전달할 때까지 재시도한다.
+3. **재고 예약:** 비관적 락으로 예약한다. 같은 주문이 다시 와도 기록된 결정을 보고 무시한다.
+4. **보상:** 재고가 부족하면 실패 이벤트로 주문을 취소한다.
+5. **예약과 확정 분리:** 출고 확정 때 예약 재고를 실물 재고에서 차감한다.
+6. **재시도와 DLT:** 일시 장애는 재시도하고, 끝내 실패한 메시지는 DLT에 원문 그대로 보관한다.
 
 ---
 
-## 실험 3: 주문 저장 후 이벤트 발행이 실패하면
+## 실험 요약
 
-DB 커밋과 Kafka 전송은 하나의 트랜잭션으로 묶을 수 없다. 5단계는 "주문 커밋 후 바로 전송"이었다. 그래서 커밋과 전송 사이에 브로커 장애나 프로세스 종료가 끼면 이벤트가 사라진다. **주문은 PENDING으로 남고 재고는 예약되지 않은 채, 두 서비스가 영원히 어긋난다.** 7단계는 Transactional Outbox로 이 문제를 해결했다.
+### 실험 1: 재고 100개에 동시 주문 1,000건 — 락 방식 비교
 
-- 코드: [`OutboxExperimentTest`](order-service/src/test/java/io/github/hbyun94/order/experiment/OutboxExperimentTest.java)
-- 실행: 일반 테스트에 포함된다(`./gradlew build`, 약 1분). 결과는 `order-service/build/experiment/experiment-3.md`에 저장된다.
+GitHub Actions 러너에서 5회 측정한 중앙값이다. [상세](docs/experiments.md#실험-1-재고-100개에-동시-주문-1000건--락-방식별-비교)
 
-### 방식
+| 방식 | 초과 판매 | 처리 시간(ms) | 비고 |
+|---|---|---|---|
+| 락 없음 | **795** | 699 | lost update로 재고 수치도 어긋남 |
+| 낙관적 락 | 0 | 621 | 성공 1건당 충돌 약 6.6회, 재시도 소진 발생 |
+| **비관적 락** | 0 | **283** | 채택(D-024) |
+| Redis 분산 락 | 0 | 848 | Redis 왕복 비용 |
 
-| 방식 | 동작 |
-|---|---|
-| 커밋 후 직접 전송 (5단계) | 주문 커밋 → `@TransactionalEventListener(AFTER_COMMIT)`에서 Kafka 전송. 실패하면 로그만 남는다. 테스트에만 남아 있다 |
-| Transactional Outbox (7단계) | 주문과 `outbox_event` 행을 **한 트랜잭션**으로 저장 → 폴링 발행기가 500ms마다 미발행 행을 `FOR UPDATE SKIP LOCKED`로 잡아 전송 → 성공하면 `published_at` 기록, 실패하면 다음 주기에 다시 시도 |
+→ 한 행에 경합이 몰리는 한정 재고에서는 DB 안에서 줄을 세우는 비관적 락이 가장 빠르고 단순했다.
 
-### 결과 (2026-11-26)
+### 실험 2: 같은 이벤트를 두 번 소비하면
 
-- 시나리오마다 주문 20건. 값은 도착한 `order.created` 수 / 주문 수.
-- **브로커 장애:** Kafka 컨테이너를 6초 동안 실제로 일시정지했다.
-- **전송 제한 시간:** 프로듀서 전송 제한 시간(`delivery.timeout.ms`)을 3초로 줄였다(기본 120초). "장애가 전송 제한 시간보다 길다"는 조건을 짧은 실험 시간 안에 만들기 위해서다.
+주문 수량 2. 정상이라면 재고 차감은 2(①②), 0(③)이어야 한다. [상세](docs/experiments.md#실험-2-같은-이벤트를-두-번-소비하면)
 
-| 방식 | 정상 | 브로커 장애 중 주문 | 커밋 직후 프로세스 종료 | 유실 |
+| 방식 | ① 중복 전달 | ② 결과 전송 실패 후 재전달 | ③ 거절 후 재고가 풀린 뒤 재전달 |
+|---|---|---|---|
+| 기록 없이 차감 | 차감 **4** | 차감 **4** | 예약됨 → 재고 **누수** |
+| 예약 기록 UNIQUE만 | 차감 2, 재시도 소진 | 결과 이벤트 **0건**, 주문 영구 PENDING | 예약됨 → 재고 **누수** |
+| **처리 결과 기록** | 차감 2 | 정상 완료 | 다시 거절 |
+
+→ DB 제약은 두 번째 쓰기를 막을 뿐이다. "이미 처리했으면 같은 결정을 유지한다"는 멱등성은 결정 기록이 있어야 생긴다.
+
+### 실험 3: 주문 저장 후 이벤트 발행이 실패하면
+
+주문 20건 기준 도착한 이벤트 수다. [상세](docs/experiments.md#실험-3-주문-저장-후-이벤트-발행이-실패하면)
+
+| 방식 | 정상 | 브로커 장애 중 | 커밋 직후 프로세스 종료 |
+|---|---|---|---|
+| 커밋 후 직접 전송 | 20 | 7~20 (실행마다 다름) | **0** |
+| **Transactional Outbox** | 20 | 20 | 20 |
+
+→ 직접 전송은 장애 중에 프로듀서가 20건 모두 "실패"로 보고했는데도 일부(한 번은 전부)가 도착했다. **타임아웃은 실패가 아니라 "모름"이다.** Outbox는 커밋된 이벤트를 결국 모두 발행했다.
+
+---
+
+## 기술별로 푼 문제
+
+각 항목은 문제, 해결, 코드, 결정, 검증 순서로 정리했다.
+
+### JPA / PostgreSQL
+
+| 문제 | 해결 | 코드 | 결정 | 검증 |
 |---|---|---|---|---|
-| 커밋 후 직접 전송 (5단계) | 20 / 20 | **8~12 / 20** (3회 실행) | **0 / 20** | 28~32 |
-| Transactional Outbox (7단계) | 20 / 20 | 20 / 20 | 20 / 20 | **0** |
+| 동시 예약의 lost update와 초과 판매 | `PESSIMISTIC_WRITE`(`FOR NO KEY UPDATE`)로 재고 행을 잠근다 | [`StockRepository`](stock-service/src/main/java/io/github/hbyun94/stock/domain/StockRepository.java), [`OrderReservationService`](stock-service/src/main/java/io/github/hbyun94/stock/application/OrderReservationService.java) | D-024 | 실험 1, [`LostUpdateTest`](stock-service/src/test/java/io/github/hbyun94/stock/domain/LostUpdateTest.java) |
+| 락을 쥔 트랜잭션이 느려지면 대기자가 커넥션을 붙잡고 쌓인다 | 락 대기 3초 상한(`SET LOCAL lock_timeout`), 초과 시 롤백 후 재시도 | `findByProductIdForReservation` | D-047 | [`ReservationLockTimeoutTest`](stock-service/src/test/java/io/github/hbyun94/stock/application/ReservationLockTimeoutTest.java) |
+| 출고 확정이 예약 처리와 같은 행을 동시에 바꾼다 | 예약 행 → 재고 행 순서로 잠근다(교착 없음) | [`StockService`](stock-service/src/main/java/io/github/hbyun94/stock/application/StockService.java) | D-048 | [`StockConfirmConcurrencyTest`](stock-service/src/test/java/io/github/hbyun94/stock/application/StockConfirmConcurrencyTest.java): 락이 없으면 재고 60이 88이 된다 |
+| 예약과 확정의 분리, 중복 확정 방지 | 주문별 예약 행(`order_id UNIQUE`)의 상태 전이(RESERVED → CONFIRMED/RELEASED) | [`StockReservation`](stock-service/src/main/java/io/github/hbyun94/stock/domain/StockReservation.java) | D-006, D-009 | [`StockReservationTest`](stock-service/src/test/java/io/github/hbyun94/stock/domain/StockReservationTest.java) |
+| 여러 발행기가 같은 Outbox 행을 보내면 안 된다 | `FOR UPDATE SKIP LOCKED`로 행을 나눠 잡는다 | [`OutboxEventRepository`](order-service/src/main/java/io/github/hbyun94/order/outbox/OutboxEventRepository.java) | D-038 | [`OutboxRelayTest`](order-service/src/test/java/io/github/hbyun94/order/outbox/OutboxRelayTest.java) |
+| 스키마와 엔티티 불일치 | Flyway가 스키마를 만들고, Hibernate는 `ddl-auto: validate`로 검사만 한다 | `db/migration` | D-010 | 모든 통합 테스트 |
 
-- **Outbox 발행 지연(정상 시나리오):** 평균 약 350ms, 최대 약 380ms. 500ms 폴링 주기의 대가다.
-- **직접 전송의 실패 보고:** 브로커 장애 중 직접 전송은 프로듀서가 **20건 모두 "실패"로 보고했다.** 그런데 그중 8~12건은 실제로 도착했다.
+### Kafka
 
-### 해석
+| 문제 | 해결 | 코드 | 결정 | 검증 |
+|---|---|---|---|---|
+| 같은 상품 주문의 처리 순서 | `order.created`의 키를 상품 ID로 둔다(같은 파티션, 순서 유지) | [`OutboxOrderEvents`](order-service/src/main/java/io/github/hbyun94/order/messaging/OutboxOrderEvents.java) | D-027 | [`OrderCreatedOutboxTest`](order-service/src/test/java/io/github/hbyun94/order/messaging/OrderCreatedOutboxTest.java) |
+| 같은 이벤트의 중복 소비 | 재고 쪽은 주문별 결정 기록(`order_event_result` PK), 주문 쪽은 상태 기반 멱등 | [`OrderReservationService`](stock-service/src/main/java/io/github/hbyun94/stock/application/OrderReservationService.java), [`Order`](order-service/src/main/java/io/github/hbyun94/order/domain/Order.java) | D-033, D-034 | 실험 2 |
+| 커밋 후 발행 실패로 이벤트 유실 | Transactional Outbox, 500ms 폴링 발행기, 최소 한 번 발행 | [`OutboxRelay`](order-service/src/main/java/io/github/hbyun94/order/outbox/OutboxRelay.java) | D-036, D-037 | 실험 3, [`ResultEventOutageTest`](stock-service/src/test/java/io/github/hbyun94/stock/messaging/ResultEventOutageTest.java) |
+| 재고 부족 시 주문 정리 | 실패 이벤트로 주문을 CANCELLED 처리(보상) | [`StockResultListener`](order-service/src/main/java/io/github/hbyun94/order/messaging/StockResultListener.java) | D-030 | [`StockResultListenerTest`](order-service/src/test/java/io/github/hbyun94/order/messaging/StockResultListenerTest.java) |
+| 처리 실패 메시지가 로그만 남기고 버려진다 | 같은 자리에서 지수 백오프 재시도(순서 유지) 후 `<토픽>.dlt`. 다시 해도 같은 실패(깨진 JSON, 필수 값 누락, 없는 주문)는 즉시 DLT | [`KafkaErrorHandlingConfig`](stock-service/src/main/java/io/github/hbyun94/stock/messaging/KafkaErrorHandlingConfig.java) | D-042 ~ D-046 | [`OrderCreatedRetryDltTest`](stock-service/src/test/java/io/github/hbyun94/stock/messaging/OrderCreatedRetryDltTest.java), [`StockResultRetryDltTest`](order-service/src/test/java/io/github/hbyun94/order/messaging/StockResultRetryDltTest.java) |
 
-**직접 전송: 커밋된 주문의 이벤트가 사라진다.**
-- 브로커 장애가 전송 제한 시간보다 길면, 프로듀서는 전송을 포기한다. 주문은 이미 커밋돼 되돌릴 수 없다.
-- 커밋 직후 프로세스가 죽으면 전송 코드에 도달하지도 못한다(0/20).
-- 유실된 주문은 PENDING에서 영원히 멈추고 재고는 예약되지 않는다. 운영자가 찾아내 수동으로 맞추기 전까지 두 서비스의 데이터가 어긋난다.
+### Redis
 
-**"실패"라는 보고를 믿을 수 없다.**
-- 프로듀서는 20건 모두 실패라고 했지만 8~12건은 실제로 도착했다. 제한 시간이 지나 프로듀서가 포기한 뒤에, 브로커가 이미 받아 둔 요청을 처리했기 때문이다.
-- 즉 타임아웃은 "실패"가 아니라 "모름"이다. 이를 실패로 보고 애플리케이션이 다시 보내면 중복이 생긴다. 소비자가 멱등해야 하는 또 하나의 이유다(실험 2).
+| 문제 | 해결 | 코드 | 결정 | 검증 |
+|---|---|---|---|---|
+| 같은 주문 요청이 두 번 들어온다(재시도, 더블 클릭) | `Idempotency-Key`를 `SET NX EX`로 선점한다. 처리 중이면 409와 `Retry-After`, 완료면 처음 응답을 그대로 돌려준다. 다른 내용으로 키를 재사용하면 422(요청 지문 SHA-256 비교) | [`IdempotencyStore`](order-service/src/main/java/io/github/hbyun94/order/idempotency/IdempotencyStore.java), [`OrderService`](order-service/src/main/java/io/github/hbyun94/order/application/OrderService.java) | D-018 ~ D-023 | [`OrderControllerTest`](order-service/src/test/java/io/github/hbyun94/order/web/OrderControllerTest.java), [`IdempotencyStoreTest`](order-service/src/test/java/io/github/hbyun94/order/idempotency/IdempotencyStoreTest.java) |
+| Redis가 죽어도 중복 주문은 막아야 한다 | DB의 `UNIQUE(idempotency_key)`가 최후 방어선이다 | `orders` 테이블 | D-019, D-023 | [`OrderServiceRedisDownTest`](order-service/src/test/java/io/github/hbyun94/order/application/OrderServiceRedisDownTest.java) |
+| 분산 락과 DB 락 비교 | Redisson `RLock`(락 → 트랜잭션 → 커밋 → 해제). 비교 후 채택하지 않았다 | [`RedisDistributedLockStockReservationStrategy`](stock-service/src/main/java/io/github/hbyun94/stock/application/reservation/RedisDistributedLockStockReservationStrategy.java) | D-014, D-015, D-024 | 실험 1 |
 
-**Outbox: 커밋됐으면 언젠가 반드시 나간다.**
-- 이벤트는 주문과 같은 트랜잭션의 DB 행이다. 주문이 커밋되면 이벤트도 커밋되고, 롤백되면 이벤트도 없다. "주문은 있는데 이벤트는 없는" 상태가 원천적으로 생기지 않는다.
-- 브로커가 죽어 있는 동안 발행기는 실패를 기록하고(`attempts`, `last_error`) 다음 주기에 다시 시도한다. 장애가 끝나면 모두 발행된다.
-- 프로세스가 죽어도 행이 DB에 남아 있으므로 재시작한 발행기가 보낸다.
+---
 
-**대가와 전제**
-- **발행 지연:** 폴링 주기만큼 늦어진다(평균 약 350ms).
-- **최소 한 번 발행:** 전송은 성공했는데 `published_at`을 커밋하기 전에 죽으면 다시 보낸다. 이 중복은 6단계의 멱등 소비(D-033, D-034)가 받아낸다. **6단계가 7단계의 전제다.**
-- **같은 패턴을 stock-service에도 적용했다:** 재고 예약 결정, 결정 기록, 결과 이벤트를 한 트랜잭션에 저장한다. 결과 전송 중 브로커가 죽어도 결과가 유실되지 않는다([`ResultEventOutageTest`](stock-service/src/test/java/io/github/hbyun94/stock/messaging/ResultEventOutageTest.java)).
+## 실행 방법
 
-### 전체 흐름 확인 (Docker Compose, 2026-11-26)
+준비물: Docker, JDK 25. Gradle은 래퍼(`./gradlew`)가 내려받는다.
 
-두 서비스를 `bootRun`으로 띄우고 다음 순서로 확인했다.
+### 테스트
 
-1. Kafka 컨테이너를 정지하고 주문 3건을 넣었다. 주문 API는 DB에만 쓰므로 모두 정상 응답했다.
-2. 장애 중 상태는 주문 3건 모두 PENDING, `outbox_event` 3행 모두 미발행이었다.
-3. Kafka를 다시 시작했다. 약 15초 후 주문 3건이 모두 RESERVED가 됐다.
-   - 재고 `reserved`: 3
-   - `order_event_result` 3건: 모두 RESERVED
-   - Outbox 3행: 모두 발행 완료. 1행은 재기동 중인 브로커에 한 번 실패해 `attempts=2`였다.
+```bash
+./gradlew build
+```
 
-## 재시도와 DLT
+Testcontainers가 PostgreSQL, Redis, Kafka를 띄워 전체 테스트를 실행한다. 실험 2와 3도 여기에 포함된다.
 
-리스너가 메시지를 처리하지 못하면 그 자리에서 간격을 두고 다시 시도하고(1s → 2s → 4s → 8s, 총 5번), 그래도 실패하면 `<원래 토픽>.dlt`로 원문을 보낸다. 같은 자리에서 재시도하므로 상품별 주문 순서가 유지된다. 설계 근거는 [D-042 ~ D-047](docs/decisions.md)에 있다.
+```bash
+./gradlew :stock-service:experiment
+```
 
-| 실패 종류 | 처리 | 검증한 테스트 |
+실험 1(락 방식 비교, 약 1분)은 따로 실행한다. 결과는 `stock-service/build/experiment/experiment-1.md`에 저장된다. GitHub에서는 Actions 탭의 "실험 1 - 락 방식 비교" → Run workflow로 실행한다.
+
+### 로컬에서 직접 띄워 보기
+
+1. 환경 변수 파일을 만든다. 비밀번호는 원하는 값으로 바꾼다. `.env`는 Git에 올라가지 않는다.
+
+```bash
+cp .env.example .env
+```
+
+2. 인프라를 띄운다. Kafka(9092), Kafka UI(8080), Redis(6379), order DB(5433), stock DB(5434)가 뜬다.
+
+```bash
+docker compose up -d
+```
+
+3. 두 서비스를 각각 다른 터미널에서 띄운다. `bootRun`이 `.env`를 읽는다.
+
+```bash
+./gradlew :stock-service:bootRun
+```
+
+```bash
+./gradlew :order-service:bootRun
+```
+
+4. 상품 1번의 재고 100개를 넣는다. 재고 등록 API는 범위 밖이라 SQL로 넣는다.
+
+```bash
+docker compose exec stock-db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "INSERT INTO stock (id, product_id, on_hand, reserved) VALUES (nextval('"'"'stock_seq'"'"'), 1, 100, 0);"'
+```
+
+5. 주문한다. 응답의 `orderId`를 아래 요청에 쓴다.
+
+```bash
+curl -i -X POST localhost:8081/orders -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-1' -d '{"productId": 1, "quantity": 2}'
+```
+
+같은 명령을 한 번 더 보내면 새 주문 없이 같은 응답과 `Idempotent-Replayed: true`가 온다.
+
+6. 주문 상태를 본다. 1초 안팎이면 `PENDING`에서 `RESERVED`로 바뀐다.
+
+```bash
+curl localhost:8081/orders/{orderId}
+```
+
+7. 출고를 확정한다. 다시 확정하면 409가 오고, 본문에 현재 상태(CONFIRMED)가 담긴다.
+
+```bash
+curl -X POST localhost:8082/reservations/{orderId}/confirm
+```
+
+8. 재고보다 많이 주문하면 `CANCELLED`가 된다(보상 처리).
+
+```bash
+curl -X POST localhost:8081/orders -H 'Content-Type: application/json' -H 'Idempotency-Key: demo-2' -d '{"productId": 1, "quantity": 500}'
+```
+
+토픽, 메시지, DLT는 Kafka UI(http://localhost:8080)에서 볼 수 있다. 정리할 때는 `docker compose down`을 실행한다. 데이터까지 지우려면 `-v`를 붙인다.
+
+API 요약:
+
+| 메서드 | 경로 | 설명 |
 |---|---|---|
-| 깨진 JSON | 재시도 없이 즉시 DLT, 원문 그대로 보관 | `OrderCreatedRetryDltTest` |
-| 필수 값 누락 | 재시도 없이 즉시 DLT | `OrderCreatedRetryDltTest` |
-| 없는 주문의 결과 이벤트 | 재시도 없이 즉시 DLT | `StockResultRetryDltTest` |
-| 일시 장애 (2번 실패 후 회복) | 재시도로 정상 처리, DLT 없음 | `OrderCreatedRetryDltTest` |
-| 계속되는 장애 | 5번 시도 후 DLT, 같은 파티션의 다음 메시지는 정상 처리 | `OrderCreatedRetryDltTest`, `StockResultRetryDltTest` |
-| 재고 행 락 대기 초과 | 3초 후 실패하고 롤백, 위 정책으로 재시도 | `ReservationLockTimeoutTest` |
+| POST | `:8081/orders` | 주문. `Idempotency-Key` 헤더 필수. 201, 같은 키 재요청은 처음 응답 반환, 처리 중이면 409, 다른 내용으로 키 재사용은 422 |
+| GET | `:8081/orders/{orderId}` | 주문 조회(PENDING / RESERVED / CANCELLED) |
+| POST | `:8082/reservations/{orderId}/confirm` | 출고 확정. 이미 확정·해제됐으면 409, 예약이 없으면 404 |
+| POST | `:8082/reservations/{orderId}/release` | 예약 해제(가용 재고 복원) |
 
-DLT 헤더에는 원래 토픽·파티션·오프셋과 예외 클래스가 남는다. DLT를 자동으로 읽는 소비자는 두지 않았다. 원인을 고친 뒤 원래 토픽으로 다시 보내면, 소비자가 멱등이라 이미 처리된 메시지가 섞여도 안전하다.
+---
+
+## 한계와 다음 단계
+
+알고 있지만 이번 범위에서 다루지 않은 것들이다.
+
+- **Outbox 행 정리 없음:** 발행된 행을 지우지 않고 `published_at`만 기록한다(D-040). 운영에서는 보관 기간 뒤 삭제하는 작업이 필요하다.
+- **발행 지연:** 폴링 주기 때문에 평균 수백 ms 늦게 발행된다. 지연이 중요하면 CDC(Debezium 등)를 검토할 수 있다.
+- **DLT는 수동 재처리:** DLT를 읽는 소비자는 없다. 원인을 고친 뒤 원래 토픽으로 다시 보내면 된다. 소비자가 멱등이라 이미 처리된 메시지가 섞여도 안전하다(D-046).
+- **출고 결과가 주문에 반영되지 않음:** 확정 API는 재고만 바꾼다. 주문을 SHIPPED로 바꾸는 이벤트는 두지 않았다(D-048).
+- **중복 확정은 409:** 같은 확정 요청의 재시도를 200으로 받아 주는 멱등 처리는 하지 않았다. 호출자는 "409 + 현재 상태 CONFIRMED"를 성공으로 볼 수 있다.
+- **브로커 1대, 복제 1:** 로컬과 테스트 구성이다. 운영이라면 복제 3과 `min.insync.replicas` 설정이 필요하다.
+- **실험 1의 측정 환경:** 단일 JVM과 4코어에서 앱과 DB가 CPU를 나눠 쓴다. 절대 시간보다 상대 비교로 읽어야 한다. 개발용 컨테이너에서는 낙관적 락과 비관적 락의 차이가 오차 범위였다.
+- **미해결 관찰:** 락 없음 경로에서 `@Version`이 없는데도 `ObjectOptimisticLockingFailureException`이 한 번 났다. 이후 71회 동안 재현되지 않았고, 원인은 확정하지 못했다.
+- **실험 3 장애 시나리오의 도착 수:** `docker pause` 특성상 실행마다 달라서, 테스트는 도착 수 대신 결정적인 사실만 단정한다(D-049).
+
+## 저장소 구조
+
+```
+order-service/     주문 API, 멱등 키, 주문 Outbox, 결과 이벤트 소비
+stock-service/     재고 예약 리스너, 확정·해제 API, 재고 Outbox, 실험 1·2
+docs/decisions.md  설계 결정 기록 (D-001 ~ D-049)
+docs/experiments.md 실험 상세
+docker-compose.yml 로컬 인프라 (Kafka KRaft, Kafka UI, Redis, PostgreSQL 2개)
+.github/workflows  CI(빌드와 테스트), 실험 1 수동 실행
+```
