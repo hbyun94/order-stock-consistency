@@ -15,6 +15,17 @@ public final class KafkaTopics {
     /** 재고 예약 실패 (stock-service 발행). 키: 주문 ID */
     public static final String STOCK_RESERVATION_FAILED = "stock.reservation-failed";
 
+    /** stock.reserved의 DLT. order-service가 소비하다 실패한 메시지가 간다 */
+    public static final String STOCK_RESERVED_DLT = STOCK_RESERVED + ".dlt";
+
+    /** stock.reservation-failed의 DLT */
+    public static final String STOCK_RESERVATION_FAILED_DLT = STOCK_RESERVATION_FAILED + ".dlt";
+
+    /** 처리하지 못한 메시지를 보내는 토픽 이름: 원래 토픽 + ".dlt" (D-045) */
+    public static String deadLetterOf(String topic) {
+        return topic + ".dlt";
+    }
+
     private KafkaTopics() {
     }
 }

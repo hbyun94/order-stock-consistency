@@ -30,6 +30,17 @@ public class KafkaConfig {
         return TopicBuilder.name(KafkaTopics.STOCK_RESERVATION_FAILED).partitions(PARTITIONS).replicas(REPLICAS).build();
     }
 
+    /** 소비하는 토픽의 DLT. 원래 파티션 번호로 보내므로 파티션 수를 원래 토픽과 같게 둔다 (D-045) */
+    @Bean
+    NewTopic stockReservedDeadLetterTopic() {
+        return TopicBuilder.name(KafkaTopics.STOCK_RESERVED_DLT).partitions(PARTITIONS).replicas(REPLICAS).build();
+    }
+
+    @Bean
+    NewTopic stockReservationFailedDeadLetterTopic() {
+        return TopicBuilder.name(KafkaTopics.STOCK_RESERVATION_FAILED_DLT).partitions(PARTITIONS).replicas(REPLICAS).build();
+    }
+
     /**
      * 문자열로 받은 JSON을 @KafkaListener 메서드의 파라미터 타입(record)으로 변환한다.
      * Spring Boot가 이 빈을 기본 리스너 컨테이너 팩토리에 연결한다.
