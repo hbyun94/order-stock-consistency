@@ -189,3 +189,18 @@ DB 커밋과 Kafka 전송은 하나의 트랜잭션으로 묶을 수 없다. 5�
    - 재고 `reserved`: 3
    - `order_event_result` 3건: 모두 RESERVED
    - Outbox 3행: 모두 발행 완료. 1행은 재기동 중인 브로커에 한 번 실패해 `attempts=2`였다.
+
+## 재시도와 DLT
+
+리스너가 메시지를 처리하지 못하면 그 자리에서 간격을 두고 다시 시도하고(1s → 2s → 4s → 8s, 총 5번), 그래도 실패하면 `<원래 토픽>.dlt`로 원문을 보낸다. 같은 자리에서 재시도하므로 상품별 주문 순서가 유지된다. 설계 근거는 [D-042 ~ D-047](docs/decisions.md)에 있다.
+
+| 실패 종류 | 처리 | 검증한 테스트 |
+|---|---|---|
+| 깨진 JSON | 재시도 없이 즉시 DLT, 원문 그대로 보관 | `OrderCreatedRetryDltTest` |
+| 필수 값 누락 | 재시도 없이 즉시 DLT | `OrderCreatedRetryDltTest` |
+| 없는 주문의 결과 이벤트 | 재시도 없이 즉시 DLT | `StockResultRetryDltTest` |
+| 일시 장애 (2번 실패 후 회복) | 재시도로 정상 처리, DLT 없음 | `OrderCreatedRetryDltTest` |
+| 계속되는 장애 | 5번 시도 후 DLT, 같은 파티션의 다음 메시지는 정상 처리 | `OrderCreatedRetryDltTest`, `StockResultRetryDltTest` |
+| 재고 행 락 대기 초과 | 3초 후 실패하고 롤백, 위 정책으로 재시도 | `ReservationLockTimeoutTest` |
+
+DLT 헤더에는 원래 토픽·파티션·오프셋과 예외 클래스가 남는다. DLT를 자동으로 읽는 소비자는 두지 않았다. 원인을 고친 뒤 원래 토픽으로 다시 보내면, 소비자가 멱등이라 이미 처리된 메시지가 섞여도 안전하다.
