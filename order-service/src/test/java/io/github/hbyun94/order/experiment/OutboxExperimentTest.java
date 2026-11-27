@@ -51,6 +51,9 @@ import tools.jackson.databind.json.JsonMapper;
  *   <li>브로커 장애: Kafka 컨테이너를 실제로 6초간 일시정지한 동안 주문한다</li>
  *   <li>커밋 직후 프로세스 종료: 주문 커밋 뒤 전송 단계가 실행되지 못한다(재시작 전 상태를 흉내)</li>
  * </ol>
+ * 단정은 결정적인 사실만 검사한다: 정상 시 모두 도착, 커밋 직후 종료 시 직접 전송 전부 유실, Outbox는 모든 시나리오에서 유실 0,
+ * 장애 중 직접 전송은 프로듀서가 실패로 알림. 장애 중 직접 전송의 실제 도착 수는 환경에 따라 달라 기록만 한다 (D-049).
+ * <p>
  * 프로듀서 전송 제한 시간(delivery.timeout.ms)을 3초로 줄였다(기본 120초). "장애가 전송 제한 시간보다 길다"는
  * 조건을 짧은 실험 시간 안에 만들기 위해서다. 기본값이어도 장애가 2분을 넘기면 같은 일이 생긴다.
  */
@@ -135,7 +138,10 @@ class OutboxExperimentTest {
         Row direct = rows.get(0);
         Row outbox = rows.get(1);
         assertThat(direct.normal()).isEqualTo(ORDERS);
-        assertThat(direct.outage()).as("직접 전송은 장애 중 주문의 이벤트를 잃는다").isLessThan(ORDERS);
+        // 장애 중 직접 전송이 실제로 몇 건 도착하는지는 타이밍에 따라 0~20건으로 달라진다(로컬 7~13건 유실, CI 한 번은 0건).
+        // 소켓까지 나간 요청은 브로커 재개 후 처리되고, 프로듀서 버퍼에 남은 요청만 만료되기 때문이다. 그래서 도착 수는 기록만 한다.
+        // 결정적인 사실은 "프로듀서가 실패로 알렸다"는 것이다: 보낸 쪽은 결과를 모른다(재전송하면 중복, 안 하면 유실 가능)
+        assertThat(directReportedFailures).as("직접 전송은 장애 중 전송을 실패로 알린다(실제 도착 여부는 모름)").isPositive();
         assertThat(direct.crash()).as("커밋 후 전송 전에 죽으면 이벤트가 없다").isZero();
         assertThat(outbox.normal()).isEqualTo(ORDERS);
         assertThat(outbox.outage()).as("Outbox는 장애가 끝나면 모두 발행한다").isEqualTo(ORDERS);
