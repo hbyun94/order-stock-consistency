@@ -86,7 +86,7 @@ public class StockReservation {
 
     private void requireReserved(String action) {
         if (status != ReservationStatus.RESERVED) {
-            throw new IllegalStateException(
+            throw new ReservationStateException(
                     "RESERVED 상태에서만 " + action + "할 수 있습니다: orderId=" + orderId + ", 현재 상태=" + status);
         }
     }
