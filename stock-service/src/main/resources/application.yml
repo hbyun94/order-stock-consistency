@@ -36,6 +36,15 @@ spring:
       # 테이블은 Flyway가 만들고, Hibernate는 엔티티와 테이블이 일치하는지 검사만 한다
       ddl-auto: validate
 
+# 리스너 처리 실패 시 같은 자리에서 재시도한다 (D-042, D-043).
+# 간격 1초부터 2배씩, 최대 8초, 재시도 4회(최초 포함 5번 시도, 약 15초). 다 실패하면 <토픽>.dlt로 보낸다 (D-045)
+kafka:
+  retry:
+    initial-interval-ms: 1000
+    multiplier: 2.0
+    max-interval-ms: 8000
+    max-retries: 4
+
 management:
   endpoints:
     web:
