@@ -23,6 +23,7 @@ dependencies {
 
 dependencies {
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
     // @ServiceConnection: 테스트 컨테이너의 접속 정보를 Spring 설정에 자동 연결
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")
