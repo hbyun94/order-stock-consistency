@@ -72,7 +72,7 @@ public class OrderReservationService {
     }
 
     private Processed decide(Long orderId, Long productId, int quantity) {
-        Optional<Stock> stock = stockRepository.findByProductIdForUpdate(productId); // 비관적 락 (D-024)
+        Optional<Stock> stock = stockRepository.findByProductIdForReservation(productId); // 비관적 락 (D-024), 대기 3초 상한 (D-047)
 
         Optional<OrderEventResult> recordedWhileWaiting = resultRepository.findById(orderId);
         if (recordedWhileWaiting.isPresent()) {
